@@ -11,49 +11,60 @@ from urllib.robotparser import RobotFileParser
 import requests
 from bs4 import BeautifulSoup
 
-# Constants that can be adjusted
-USER_AGENT = "WebsiteCopyScraper/1.0"
-DELAY_BETWEEN_REQUESTS = 1  # seconds
-MAX_PAGES_TO_CRAWL = 1000
-MAX_DEPTH = 10  # Maximum depth to crawl from root URL
-OUTPUT_FORMAT = "json"  # Options: json, txt, markdown
-EXCLUDE_URL_PATTERNS = [
-    r'\.(jpg|jpeg|png|gif|svg|webp|pdf|doc|docx|xls|xlsx|zip|tar|gz|mp3|mp4|avi|mov)$',
-    r'(logout|signout|login|signin|cart|checkout|wp-admin|wp-content|feed)',
-    r'(#.*$)'  # Exclude URL fragments
-]
-IGNORE_QUERY_PARAMS = True  # Treat URLs that differ only by query parameters as the same
-CHECK_SITEMAP = True  # Check for sitemap.xml
-INCLUDED_TAGS = {
-    'headings': ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
-    'paragraphs': ['p'],
-    'lists': ['ul', 'ol'],
-    'list_items': ['li'],
-    'blockquotes': ['blockquote']
-}
-TEXT_CLEANUP_PATTERNS = [
-    (r'\s+', ' '),  # Replace multiple whitespace with single space
-    (r'^\s+|\s+$', '')  # Remove leading/trailing whitespace
-]
-CONTENT_WRAPPERS = [
-    'main', 'article', 'section', 'div.content', 'div.main', 'div.post', 
-    'div#content', 'div#main', 'div.entry', '.post-content', '.entry-content',
-    '.article-content', '.content-area'
-]
-
 class WebsiteCrawler:
-    def __init__(self, root_url, output_dir="output", respect_robots=True, max_depth=MAX_DEPTH):
+    def __init__(self, root_url, output_dir="output", respect_robots=True, max_depth=10, 
+                 max_pages=1000, delay=1, ignore_query_params=True, check_sitemap=True, 
+                 output_format="json"):
         self.root_url = self._normalize_url(root_url)
         self.root_domain = urllib.parse.urlparse(self.root_url).netloc
         self.output_dir = output_dir
-        self.visited_urls = set()
-        # Store URL and its depth from root
-        self.queued_urls = deque([(self.root_url, 0)])
-        self.page_content = {}
         self.respect_robots = respect_robots
         self.max_depth = max_depth
+        self.max_pages = max_pages
+        self.delay = delay
+        self.ignore_query_params = ignore_query_params
+        self.check_sitemap = check_sitemap
+        self.output_format = output_format
+        
+        # User agent for requests
+        self.user_agent = "WebsiteCopyScraper/1.0"
+        
+        # URL tracking
+        self.visited_urls = set()
+        self.queued_urls = deque([(self.root_url, 0)])  # URL and its depth from root
+        self.page_content = {}
         self.robot_parser = None
         
+        # URL exclusion patterns
+        self.exclude_url_patterns = [
+            r'\.(jpg|jpeg|png|gif|svg|webp|pdf|doc|docx|xls|xlsx|zip|tar|gz|mp3|mp4|avi|mov)$',
+            r'(logout|signout|login|signin|cart|checkout|wp-admin|wp-content|feed)',
+            r'(#.*$)'  # Exclude URL fragments
+        ]
+        
+        # Text cleanup patterns
+        self.text_cleanup_patterns = [
+            (r'\s+', ' '),  # Replace multiple whitespace with single space
+            (r'^\s+|\s+$', '')  # Remove leading/trailing whitespace
+        ]
+        
+        # Content tags to extract
+        self.included_tags = {
+            'headings': ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
+            'paragraphs': ['p'],
+            'lists': ['ul', 'ol'],
+            'list_items': ['li'],
+            'blockquotes': ['blockquote']
+        }
+        
+        # Common content wrappers
+        self.content_wrappers = [
+            'main', 'article', 'section', 'div.content', 'div.main', 'div.post', 
+            'div#content', 'div#main', 'div.entry', '.post-content', '.entry-content',
+            '.article-content', '.content-area'
+        ]
+        
+        # Setup
         if respect_robots:
             self._setup_robot_parser()
         
@@ -61,12 +72,12 @@ class WebsiteCrawler:
         os.makedirs(output_dir, exist_ok=True)
         
         # Compile exclusion patterns
-        self.exclude_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in EXCLUDE_URL_PATTERNS]
+        self.exclude_patterns = [re.compile(pattern, re.IGNORECASE) for pattern in self.exclude_url_patterns]
         # Compile text cleanup patterns
-        self.cleanup_patterns = [(re.compile(pattern), repl) for pattern, repl in TEXT_CLEANUP_PATTERNS]
+        self.cleanup_patterns = [(re.compile(pattern), repl) for pattern, repl in self.text_cleanup_patterns]
         
         # Check for sitemap
-        if CHECK_SITEMAP:
+        if self.check_sitemap:
             self._check_sitemap()
     
     def _setup_robot_parser(self):
@@ -83,7 +94,7 @@ class WebsiteCrawler:
         """Check for sitemap.xml and add found URLs to the queue."""
         sitemap_url = urllib.parse.urljoin(self.root_url, "/sitemap.xml")
         try:
-            response = requests.get(sitemap_url, headers={"User-Agent": USER_AGENT}, timeout=10)
+            response = requests.get(sitemap_url, headers={"User-Agent": self.user_agent}, timeout=10)
             if response.status_code == 200:
                 print(f"Found sitemap at {sitemap_url}")
                 soup = BeautifulSoup(response.text, 'xml')
@@ -114,7 +125,7 @@ class WebsiteCrawler:
         
         # Remove query params if configured to ignore them
         query = parsed.query
-        if IGNORE_QUERY_PARAMS:
+        if self.ignore_query_params:
             query = ''
         
         # Reassemble the URL
@@ -148,7 +159,7 @@ class WebsiteCrawler:
         """Check if a URL can be fetched according to robots.txt."""
         if not self.respect_robots or not self.robot_parser:
             return True
-        return self.robot_parser.can_fetch(USER_AGENT, url)
+        return self.robot_parser.can_fetch(self.user_agent, url)
     
     def _extract_links(self, soup, page_url, current_depth):
         """Extract internal links from a BeautifulSoup object."""
@@ -190,7 +201,7 @@ class WebsiteCrawler:
     def _find_main_content(self, soup):
         """Try to find the main content area of the page."""
         # Look for common content container elements
-        for selector in CONTENT_WRAPPERS:
+        for selector in self.content_wrappers:
             if '.' in selector or '#' in selector:
                 # CSS selector
                 element = soup.select_one(selector)
@@ -249,7 +260,7 @@ class WebsiteCrawler:
             element.decompose()
         
         # Process headings
-        for heading_tag in INCLUDED_TAGS['headings']:
+        for heading_tag in self.included_tags['headings']:
             for heading in main_content.find_all(heading_tag):
                 # Skip empty headings
                 cleaned_text = self._clean_text(heading.text)
@@ -308,7 +319,7 @@ class WebsiteCrawler:
         """Crawl the website and extract content."""
         page_count = 0
         
-        while self.queued_urls and page_count < MAX_PAGES_TO_CRAWL:
+        while self.queued_urls and page_count < self.max_pages:
             url, depth = self.queued_urls.popleft()
             
             # Skip if already visited or cannot fetch
@@ -320,7 +331,7 @@ class WebsiteCrawler:
             # Fetch URL content
             try:
                 print(f"Crawling: {url} (depth: {depth})")
-                response = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+                response = requests.get(url, headers={"User-Agent": self.user_agent}, timeout=10)
                 
                 # Handle redirects
                 if response.history:
@@ -357,7 +368,7 @@ class WebsiteCrawler:
                 page_count += 1
                 
                 # Respect crawl delay
-                time.sleep(DELAY_BETWEEN_REQUESTS)
+                time.sleep(self.delay)
                 
             except requests.exceptions.RequestException as e:
                 print(f"Request error crawling {url}: {e}")
@@ -393,7 +404,7 @@ class WebsiteCrawler:
                 f.write("\n")
                 
                 for element in content['elements']:
-                    if element['type'] in INCLUDED_TAGS['headings']:
+                    if element['type'] in self.included_tags['headings']:
                         f.write(f"{element['type'].upper()}: {element['text']}\n\n")
                     elif element['type'] == 'paragraph':
                         f.write(f"{element['text']}\n\n")
@@ -444,7 +455,7 @@ class WebsiteCrawler:
                     f.write(f"URL: {url}\n\n")
                     
                     for element in content['elements']:
-                        if element['type'] in INCLUDED_TAGS['headings']:
+                        if element['type'] in self.included_tags['headings']:
                             level = int(element['type'][1])  # Get the heading level (h1, h2, etc.)
                             # Adjust level to be under the title
                             level = min(level + 1, 6)
@@ -481,37 +492,46 @@ class WebsiteCrawler:
     
     def _save_results(self):
         """Save the crawled results to the specified output format."""
-        if OUTPUT_FORMAT == "json":
+        if self.output_format == "json":
             self._save_as_json()
-        elif OUTPUT_FORMAT == "txt":
+        elif self.output_format == "txt":
             self._save_as_text()
-        elif OUTPUT_FORMAT == "markdown":
+        elif self.output_format == "markdown":
             self._save_as_markdown()
 
 def main():
+    # Default settings
+    default_output_format = "json"
+    default_max_pages = 1000
+    default_max_depth = 10
+    default_delay = 1
+    
     parser = argparse.ArgumentParser(description="Website copy scraper - Extract text content from websites")
     parser.add_argument("url", help="The root URL of the website to crawl")
     parser.add_argument("--output", "-o", default="output", help="Output directory")
-    parser.add_argument("--format", "-f", choices=["json", "txt", "markdown"], default=OUTPUT_FORMAT, help="Output format")
-    parser.add_argument("--max-pages", "-m", type=int, default=MAX_PAGES_TO_CRAWL, help="Maximum pages to crawl")
-    parser.add_argument("--max-depth", "-d", type=int, default=MAX_DEPTH, help="Maximum crawl depth from root URL")
-    parser.add_argument("--delay", "-w", type=float, default=DELAY_BETWEEN_REQUESTS, help="Delay between requests in seconds")
+    parser.add_argument("--format", "-f", choices=["json", "txt", "markdown"], default=default_output_format, help="Output format")
+    parser.add_argument("--max-pages", "-m", type=int, default=default_max_pages, help="Maximum pages to crawl")
+    parser.add_argument("--max-depth", "-d", type=int, default=default_max_depth, help="Maximum crawl depth from root URL")
+    parser.add_argument("--delay", "-w", type=float, default=default_delay, help="Delay between requests in seconds")
     parser.add_argument("--ignore-robots", action="store_true", help="Ignore robots.txt")
     parser.add_argument("--respect-params", action="store_true", help="Treat URLs with different query parameters as different pages")
     parser.add_argument("--skip-sitemap", action="store_true", help="Skip checking sitemap.xml")
     
     args = parser.parse_args()
     
-    # Update global constants based on arguments
-    global OUTPUT_FORMAT, MAX_PAGES_TO_CRAWL, MAX_DEPTH, DELAY_BETWEEN_REQUESTS, IGNORE_QUERY_PARAMS, CHECK_SITEMAP
-    OUTPUT_FORMAT = args.format
-    MAX_PAGES_TO_CRAWL = args.max_pages
-    MAX_DEPTH = args.max_depth
-    DELAY_BETWEEN_REQUESTS = args.delay
-    IGNORE_QUERY_PARAMS = not args.respect_params
-    CHECK_SITEMAP = not args.skip_sitemap
+    # Create and run the crawler with all parameters from command line
+    crawler = WebsiteCrawler(
+        root_url=args.url,
+        output_dir=args.output,
+        respect_robots=not args.ignore_robots,
+        max_depth=args.max_depth,
+        max_pages=args.max_pages,
+        delay=args.delay,
+        ignore_query_params=not args.respect_params,
+        check_sitemap=not args.skip_sitemap,
+        output_format=args.format
+    )
     
-    crawler = WebsiteCrawler(args.url, args.output, not args.ignore_robots, args.max_depth)
     crawler.crawl()
 
 if __name__ == "__main__":
