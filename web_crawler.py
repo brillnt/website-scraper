@@ -178,6 +178,75 @@ class WebsiteCrawler:
             print(f"Error setting up browser: {e}")
             print("Falling back to regular requests.")
             self.js_mode = "headers"
+    
+    def _is_binary_content(self, content):
+        """Check if content appears to be binary rather than text."""
+        # Check for common binary file signatures
+        if isinstance(content, bytes):
+            # Check for common binary file signatures (PDF, images, etc.)
+            if (content.startswith(b'%PDF-') or content.startswith(b'\x89PNG\r\n') or 
+                content.startswith(b'GIF8') or content.startswith(b'\xFF\xD8\xFF')):
+                return True
+                
+            # Check if there's a high proportion of null bytes or binary data
+            sample = content[:4000]  # Check a reasonable sample
+            binary_chars = sum(1 for b in sample if b < 9 or (b > 13 and b < 32) or b > 126)
+            return binary_chars > len(sample) * 0.1  # More than 10% binary is suspicious
+        return False
+    
+    def _detect_encoding(self, response):
+        """Detect and set the appropriate character encoding for HTTP response."""
+        # First try content-type header
+        content_type = response.headers.get('content-type', '').lower()
+        charset = None
+        
+        if 'charset=' in content_type:
+            charset_match = re.search(r'charset=([^\s;]+)', content_type)
+            if charset_match:
+                charset = charset_match.group(1)
+                if self.verbose:
+                    print(f"  Found charset in HTTP header: {charset}")
+        
+        # If no charset in header, try apparent encoding
+        if not charset:
+            charset = response.apparent_encoding
+            if charset:
+                if self.verbose:
+                    print(f"  Using detected encoding: {charset}")
+            else:
+                # Default to UTF-8 as a last resort
+                charset = 'utf-8'
+                if self.verbose:
+                    print(f"  No encoding detected, defaulting to UTF-8")
+        
+        # Set the response encoding
+        response.encoding = charset
+        return charset
+    
+    def _save_debug_content(self, url, raw_content, decoded_content):
+        """Save raw and decoded content for debugging encoding issues."""
+        debug_dir = os.path.join(self.output_dir, "debug_encoding")
+        os.makedirs(debug_dir, exist_ok=True)
+        
+        # Create a filename based on the URL
+        page_filename = urllib.parse.urlparse(url).path
+        if not page_filename or page_filename == '/':
+            page_filename = 'index'
+        else:
+            page_filename = page_filename.strip('/').replace('/', '_')
+        
+        # Save the raw binary content
+        raw_filename = os.path.join(debug_dir, f"{self.root_domain}_{page_filename}_raw.bin")
+        with open(raw_filename, 'wb') as f:
+            f.write(raw_content)
+        
+        # Save the decoded text content
+        decoded_filename = os.path.join(debug_dir, f"{self.root_domain}_{page_filename}_decoded.txt")
+        with open(decoded_filename, 'w', encoding='utf-8', errors='replace') as f:
+            f.write(decoded_content)
+        
+        if self.verbose:
+            print(f"  Saved debug content to {debug_dir}")
             
     def _fetch_with_browser(self, url):
         """Fetch a URL using the headless browser with JavaScript rendering."""
@@ -196,6 +265,14 @@ class WebsiteCrawler:
             # Get the page source after JavaScript execution
             html = self.browser.page_source
             
+            if not html:
+                return None
+                
+            # Check if the page source appears to be properly encoded text
+            if isinstance(html, bytes) and self._is_binary_content(html):
+                print(f"  Error: Browser returned binary content")
+                return None
+                
             if self.verbose:
                 print(f"  Page fetched successfully with browser, HTML size: {len(html)} bytes")
                 
@@ -347,7 +424,7 @@ class WebsiteCrawler:
                 page_filename = page_filename.strip('/').replace('/', '_')
             
             filename = os.path.join(debug_dir, f"{self.root_domain}_{page_filename}.html")
-            with open(filename, 'w', encoding='utf-8') as f:
+            with open(filename, 'w', encoding='utf-8', errors='replace') as f:
                 f.write(str(soup))
             print(f"  Saved HTML to {filename} for debugging")
         
@@ -465,14 +542,51 @@ class WebsiteCrawler:
             
         return links
     
+    def _validate_text(self, text):
+        """Ensure text is valid Unicode and clean it."""
+        if text is None:
+            return ""
+        
+        # Convert to string if somehow not already
+        if not isinstance(text, str):
+            try:
+                text = str(text)
+            except Exception:
+                return "[Undecodable content]"
+        
+        # Remove or replace problematic characters
+        text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+        
+        # Apply normal text cleanup
+        return self._clean_text(text)
+    
     def _clean_text(self, text):
         """Clean up text by applying cleanup patterns."""
         if not text:
             return ""
             
+        # Handle potential non-string input
+        if not isinstance(text, str):
+            try:
+                text = str(text)
+            except Exception:
+                return ""
+                
+        # Apply regular cleanup patterns
         cleaned = text
         for pattern, repl in self.cleanup_patterns:
-            cleaned = pattern.sub(repl, cleaned)
+            try:
+                cleaned = pattern.sub(repl, cleaned)
+            except Exception:
+                # If regex fails, just return the original
+                pass
+        
+        # Additional sanity checks
+        # Remove control characters
+        cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', cleaned)
+        
+        # Replace very long strings of the same character (likely garbage)
+        cleaned = re.sub(r'(.)\1{30,}', r'\1\1\1...', cleaned)
         
         return cleaned
     
@@ -516,7 +630,7 @@ class WebsiteCrawler:
         
         content = {
             "url": url,
-            "title": self._clean_text(soup.title.text) if soup.title else "No Title",
+            "title": self._validate_text(soup.title.text if soup.title else "No Title"),
             "page_type": page_type,
             "meta_description": "",
             "elements": []
@@ -525,7 +639,7 @@ class WebsiteCrawler:
         # Extract meta description
         meta_desc = soup.find('meta', attrs={"name": "description"})
         if meta_desc:
-            content["meta_description"] = self._clean_text(meta_desc.get('content', ''))
+            content["meta_description"] = self._validate_text(meta_desc.get('content', ''))
         
         # Find main content area - Wix specific selectors
         main_content = None
@@ -566,7 +680,7 @@ class WebsiteCrawler:
                         element_type = 'h3'
                 
                 # Clean the text
-                cleaned_text = self._clean_text(element.text)
+                cleaned_text = self._validate_text(element.text)
                 if cleaned_text:
                     content["elements"].append({
                         "type": element_type,
@@ -591,7 +705,7 @@ class WebsiteCrawler:
         for heading_tag in self.included_tags['headings']:
             for heading in main_content.find_all(heading_tag):
                 # Skip empty headings
-                cleaned_text = self._clean_text(heading.text)
+                cleaned_text = self._validate_text(heading.text)
                 if cleaned_text:
                     content["elements"].append({
                         "type": heading_tag,
@@ -601,7 +715,7 @@ class WebsiteCrawler:
         # Process paragraphs
         for para in main_content.find_all('p'):
             # Skip empty paragraphs
-            cleaned_text = self._clean_text(para.text)
+            cleaned_text = self._validate_text(para.text)
             if cleaned_text:
                 content["elements"].append({
                     "type": "paragraph",
@@ -621,7 +735,7 @@ class WebsiteCrawler:
                 
             list_items = []
             for li in list_tag.find_all('li', recursive=False):
-                cleaned_text = self._clean_text(li.text)
+                cleaned_text = self._validate_text(li.text)
                 if cleaned_text:
                     list_items.append(cleaned_text)
             
@@ -634,7 +748,7 @@ class WebsiteCrawler:
         
         # Process blockquotes
         for quote in main_content.find_all('blockquote'):
-            cleaned_text = self._clean_text(quote.text)
+            cleaned_text = self._validate_text(quote.text)
             if cleaned_text:
                 content["elements"].append({
                     "type": "blockquote",
@@ -652,7 +766,7 @@ class WebsiteCrawler:
             # Get all elements with text
             for element in main_content.find_all(text=True):
                 if element.parent.name not in ['script', 'style', 'meta', 'link']:
-                    text = self._clean_text(element)
+                    text = self._validate_text(element)
                     if text and len(text) > 20:  # Only consider substantial text
                         # Try to determine if it's a heading or paragraph
                         parent = element.parent
@@ -703,6 +817,7 @@ class WebsiteCrawler:
             try:
                 print(f"Crawling: {url} (depth: {depth})")
                 html_content = None
+                raw_content = None
                 final_url = url
                 
                 # Decide how to fetch the page based on the js_mode
@@ -722,19 +837,39 @@ class WebsiteCrawler:
                         print(f"  Fetching with requests: {url}")
                     
                     response = requests.get(url, headers=self.headers, timeout=15)
+                    raw_content = response.content  # Store raw binary content
                     
                     # Handle redirects
                     if response.history:
                         final_url = self._normalize_url(response.url)
                         print(f"  Redirected to: {final_url}")
                     
-                    # Skip non-HTML content
+                    # Check content type
                     content_type = response.headers.get('content-type', '').lower()
                     if 'text/html' not in content_type:
                         print(f"  Skipping non-HTML content type: {content_type}")
                         continue
                     
+                    # Check for binary content
+                    if self._is_binary_content(raw_content):
+                        print(f"  Skipping binary content detected as HTML")
+                        if self.verbose:
+                            print(f"  Content appears to be binary but was served as HTML")
+                            self._save_debug_content(url, raw_content, "BINARY CONTENT")
+                        continue
+                    
+                    # Detect and set encoding
+                    self._detect_encoding(response)
+                    
+                    if self.verbose:
+                        print(f"  Using encoding: {response.encoding}")
+                    
+                    # Get the decoded content
                     html_content = response.text
+                    
+                    # Save debug info if verbose
+                    if self.verbose:
+                        self._save_debug_content(url, raw_content, html_content)
                 
                 # If final URL is different, handle it
                 if final_url != url:
@@ -746,7 +881,22 @@ class WebsiteCrawler:
                 if self.verbose:
                     print(f"  Parsing HTML content: {len(html_content)} bytes")
                 
-                soup = BeautifulSoup(html_content, 'html.parser')
+                try:
+                    # First try with default parser
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                except Exception as e:
+                    print(f"  Error parsing HTML with html.parser: {e}")
+                    
+                    # Try alternative parsers if available
+                    try:
+                        if 'has_lxml' in globals() and has_lxml:
+                            soup = BeautifulSoup(html_content, 'lxml')
+                        else:
+                            # Try with explicitly declared encoding
+                            soup = BeautifulSoup(html_content, 'html.parser', from_encoding='utf-8')
+                    except Exception as e2:
+                        print(f"  Failed to parse HTML with alternative parsers: {e2}")
+                        continue
                 
                 # Extract and store text content
                 page_content = self._extract_text_content(soup, url)
@@ -803,18 +953,116 @@ class WebsiteCrawler:
     def _save_as_json(self):
         """Save the crawled results as JSON."""
         output_file = os.path.join(self.output_dir, f"{self.root_domain}_content.json")
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(list(self.page_content.values()), f, indent=2, ensure_ascii=False)
-        print(f"Content saved as JSON to {output_file}")
+        try:
+            with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                json.dump(list(self.page_content.values()), f, indent=2, ensure_ascii=False)
+            print(f"Content saved as JSON to {output_file}")
+        except Exception as e:
+            print(f"Error saving JSON output: {e}")
+            # Try a more forgiving approach
+            try:
+                with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                    # Convert any problematic elements to strings
+                    safe_data = []
+                    for page in self.page_content.values():
+                        safe_page = {
+                            "url": page["url"],
+                            "title": self._validate_text(page["title"]),
+                            "page_type": page["page_type"],
+                            "meta_description": self._validate_text(page["meta_description"]),
+                            "elements": []
+                        }
+                        
+                        for element in page["elements"]:
+                            safe_element = element.copy()
+                            if "text" in safe_element:
+                                safe_element["text"] = self._validate_text(safe_element["text"])
+                            if "items" in safe_element:
+                                safe_element["items"] = [self._validate_text(item) for item in safe_element["items"]]
+                            safe_page["elements"].append(safe_element)
+                        
+                        safe_data.append(safe_page)
+                        
+                    json.dump(safe_data, f, indent=2, ensure_ascii=False)
+                print(f"Content saved as sanitized JSON to {output_file}")
+            except Exception as e2:
+                print(f"Critical error saving JSON: {e2}")
     
     def _save_as_text(self):
         """Save the crawled results as text."""
         output_file = os.path.join(self.output_dir, f"{self.root_domain}_content.txt")
-        with open(output_file, 'w', encoding='utf-8') as f:
-            # First, write an index of pages at the top
-            f.write(f"# {self.root_domain} Website Content\n\n")
-            f.write("## Table of Contents\n\n")
+        try:
+            with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                # First, write an index of pages at the top
+                f.write(f"# {self.root_domain} Website Content\n\n")
+                f.write("## Table of Contents\n\n")
+                
+                # Group pages by type
+                pages_by_type = {}
+                for url, content in self.page_content.items():
+                    page_type = content["page_type"]
+                    if page_type not in pages_by_type:
+                        pages_by_type[page_type] = []
+                    pages_by_type[page_type].append((url, content))
+                
+                # Write the table of contents
+                for page_type, pages in sorted(pages_by_type.items()):
+                    f.write(f"* {page_type.replace('_', ' ').title()}\n")
+                    for url, content in sorted(pages, key=lambda x: x[1]['title']):
+                        f.write(f"  - {self._validate_text(content['title'])}\n")
+                
+                f.write("\n" + "="*80 + "\n\n")
+                
+                # Now write each page's content in a more human-readable format
+                for url, content in self.page_content.items():
+                    # Write page header
+                    f.write(f"# {self._validate_text(content['title'])}\n\n")
+                    
+                    # URL and metadata in a more subtle format
+                    f.write(f"URL: {url}\n")
+                    f.write(f"Type: {content['page_type'].replace('_', ' ').title()}\n")
+                    if content['meta_description']:
+                        f.write(f"Description: {self._validate_text(content['meta_description'])}\n")
+                    f.write("\n")
+                    
+                    # Process elements to group related content
+                    current_heading = None
+                    current_heading_level = 0
+                    
+                    for element in content['elements']:
+                        if element['type'] in self.included_tags['headings']:
+                            # Get the heading level (h1, h2, etc.)
+                            level = int(element['type'][1])
+                            # Format heading with the right number of #
+                            prefix = "#" * (level + 1)  # +1 because we used # for page title
+                            f.write(f"{prefix} {self._validate_text(element['text'])}\n\n")
+                            current_heading = element['text']
+                            current_heading_level = level
+                        elif element['type'] == 'paragraph':
+                            f.write(f"{self._validate_text(element['text'])}\n\n")
+                        elif element['type'] == 'list':
+                            for idx, item in enumerate(element['items']):
+                                if element['list_type'] == 'unordered':
+                                    f.write(f"* {self._validate_text(item)}\n")
+                                else:
+                                    f.write(f"{idx+1}. {self._validate_text(item)}\n")
+                            f.write("\n")
+                        elif element['type'] == 'blockquote':
+                            # Format blockquotes with indentation
+                            lines = self._validate_text(element['text']).split('\n')
+                            for line in lines:
+                                f.write(f"> {line}\n")
+                            f.write("\n")
+                    
+                    f.write("\n" + "="*80 + "\n\n")
             
+            print(f"Content saved as text to {output_file}")
+        except Exception as e:
+            print(f"Error saving text content: {e}")
+    
+    def _save_as_markdown(self):
+        """Save the crawled results as markdown files."""
+        try:
             # Group pages by type
             pages_by_type = {}
             for url, content in self.page_content.items():
@@ -823,199 +1071,170 @@ class WebsiteCrawler:
                     pages_by_type[page_type] = []
                 pages_by_type[page_type].append((url, content))
             
-            # Write the table of contents
-            for page_type, pages in sorted(pages_by_type.items()):
-                f.write(f"* {page_type.replace('_', ' ').title()}\n")
-                for url, content in sorted(pages, key=lambda x: x[1]['title']):
-                    f.write(f"  - {content['title']}\n")
-            
-            f.write("\n" + "="*80 + "\n\n")
-            
-            # Now write each page's content in a more human-readable format
-            for url, content in self.page_content.items():
-                # Write page header
-                f.write(f"# {content['title']}\n\n")
+            # Create a folder for each page type
+            for page_type, pages in pages_by_type.items():
+                type_dir = os.path.join(self.output_dir, page_type)
+                os.makedirs(type_dir, exist_ok=True)
                 
-                # URL and metadata in a more subtle format
-                f.write(f"URL: {url}\n")
-                f.write(f"Type: {content['page_type'].replace('_', ' ').title()}\n")
-                if content['meta_description']:
-                    f.write(f"Description: {content['meta_description']}\n")
-                f.write("\n")
-                
-                # Process elements to group related content
-                current_heading = None
-                current_heading_level = 0
-                
-                for element in content['elements']:
-                    if element['type'] in self.included_tags['headings']:
-                        # Get the heading level (h1, h2, etc.)
-                        level = int(element['type'][1])
-                        # Format heading with the right number of #
-                        prefix = "#" * (level + 1)  # +1 because we used # for page title
-                        f.write(f"{prefix} {element['text']}\n\n")
-                        current_heading = element['text']
-                        current_heading_level = level
-                    elif element['type'] == 'paragraph':
-                        f.write(f"{element['text']}\n\n")
-                    elif element['type'] == 'list':
-                        for idx, item in enumerate(element['items']):
-                            if element['list_type'] == 'unordered':
-                                f.write(f"* {item}\n")
-                            else:
-                                f.write(f"{idx+1}. {item}\n")
-                        f.write("\n")
-                    elif element['type'] == 'blockquote':
-                        # Format blockquotes with indentation
-                        lines = element['text'].split('\n')
-                        for line in lines:
-                            f.write(f"> {line}\n")
-                        f.write("\n")
-                
-                f.write("\n" + "="*80 + "\n\n")
-        
-        print(f"Content saved as text to {output_file}")
-    
-    def _save_as_markdown(self):
-        """Save the crawled results as markdown files."""
-        # Group pages by type
-        pages_by_type = {}
-        for url, content in self.page_content.items():
-            page_type = content["page_type"]
-            if page_type not in pages_by_type:
-                pages_by_type[page_type] = []
-            pages_by_type[page_type].append((url, content))
-        
-        # Create a folder for each page type
-        for page_type, pages in pages_by_type.items():
-            type_dir = os.path.join(self.output_dir, page_type)
-            os.makedirs(type_dir, exist_ok=True)
-            
-            # Save each page as a markdown file
-            for url, content in pages:
-                # Create a filename based on the URL path
-                path = urllib.parse.urlparse(url).path
-                if not path or path == '/':
-                    filename = 'index.md'
-                else:
-                    # Convert path to filename
-                    filename = path.strip('/').replace('/', '_') + '.md'
-                
-                output_file = os.path.join(type_dir, filename)
-                
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(f"# {content['title']}\n\n")
+                # Save each page as a markdown file
+                for url, content in pages:
+                    # Create a filename based on the URL path
+                    path = urllib.parse.urlparse(url).path
+                    if not path or path == '/':
+                        filename = 'index.md'
+                    else:
+                        # Convert path to filename
+                        filename = path.strip('/').replace('/', '_') + '.md'
                     
-                    if content['meta_description']:
-                        f.write(f"_{content['meta_description']}_\n\n")
+                    output_file = os.path.join(type_dir, filename)
                     
-                    f.write(f"URL: {url}\n\n")
-                    
-                    for element in content['elements']:
-                        if element['type'] in self.included_tags['headings']:
-                            level = int(element['type'][1])  # Get the heading level (h1, h2, etc.)
-                            # Adjust level to be under the title
-                            level = min(level + 1, 6)
-                            f.write(f"{'#' * level} {element['text']}\n\n")
-                        elif element['type'] == 'paragraph':
-                            f.write(f"{element['text']}\n\n")
-                        elif element['type'] == 'list':
-                            for item in element['items']:
-                                if element['list_type'] == 'unordered':
-                                    f.write(f"* {item}\n")
-                                else:
-                                    f.write(f"1. {item}\n")
-                            f.write("\n")
-                        elif element['type'] == 'blockquote':
-                            f.write(f"> {element['text']}\n\n")
-        
-        # Create an index file
-        index_file = os.path.join(self.output_dir, "index.md")
-        with open(index_file, 'w', encoding='utf-8') as f:
-            f.write(f"# {self.root_domain} Content\n\n")
+                    with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                        f.write(f"# {self._validate_text(content['title'])}\n\n")
+                        
+                        if content['meta_description']:
+                            f.write(f"_{self._validate_text(content['meta_description'])}_\n\n")
+                        
+                        f.write(f"URL: {url}\n\n")
+                        
+                        for element in content['elements']:
+                            if element['type'] in self.included_tags['headings']:
+                                level = int(element['type'][1])  # Get the heading level (h1, h2, etc.)
+                                # Adjust level to be under the title
+                                level = min(level + 1, 6)
+                                f.write(f"{'#' * level} {self._validate_text(element['text'])}\n\n")
+                            elif element['type'] == 'paragraph':
+                                f.write(f"{self._validate_text(element['text'])}\n\n")
+                            elif element['type'] == 'list':
+                                for item in element['items']:
+                                    if element['list_type'] == 'unordered':
+                                        f.write(f"* {self._validate_text(item)}\n")
+                                    else:
+                                        f.write(f"1. {self._validate_text(item)}\n")
+                                f.write("\n")
+                            elif element['type'] == 'blockquote':
+                                f.write(f"> {self._validate_text(element['text'])}\n\n")
             
-            f.write("## Contents\n\n")
-            # Write a section for each page type
-            for page_type, pages in sorted(pages_by_type.items()):
-                f.write(f"### {page_type.replace('_', ' ').title()}\n\n")
-                for url, content in sorted(pages, key=lambda x: x[1]['title']):
-                    path = f"{page_type}/{urllib.parse.urlparse(url).path.strip('/').replace('/', '_')}.md"
-                    if path.endswith("/.md"):
-                        path = f"{page_type}/index.md"
-                    f.write(f"* [{content['title']}]({path})\n")
-                f.write("\n")
-        
-        print(f"Content saved as markdown files to {self.output_dir}")
+            # Create an index file
+            index_file = os.path.join(self.output_dir, "index.md")
+            with open(index_file, 'w', encoding='utf-8', errors='replace') as f:
+                f.write(f"# {self.root_domain} Content\n\n")
+                
+                f.write("## Contents\n\n")
+                # Write a section for each page type
+                for page_type, pages in sorted(pages_by_type.items()):
+                    f.write(f"### {page_type.replace('_', ' ').title()}\n\n")
+                    for url, content in sorted(pages, key=lambda x: x[1]['title']):
+                        path = f"{page_type}/{urllib.parse.urlparse(url).path.strip('/').replace('/', '_')}.md"
+                        if path.endswith("/.md"):
+                            path = f"{page_type}/index.md"
+                        f.write(f"* [{self._validate_text(content['title'])}]({path})\n")
+                    f.write("\n")
+            
+            print(f"Content saved as markdown files to {self.output_dir}")
+        except Exception as e:
+            print(f"Error saving markdown content: {e}")
     
     def _save_as_readable(self):
         """Save the crawled results as a clean, human-readable document."""
         output_file = os.path.join(self.output_dir, f"{self.root_domain}_content_readable.txt")
-        with open(output_file, 'w', encoding='utf-8') as f:
-            # First, create a header with minimal metadata
-            f.write(f"{self.root_domain} Website Content\n")
-            f.write("="*len(f"{self.root_domain} Website Content") + "\n\n")
-            f.write(f"Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            
-            # Group pages by type for better organization
-            pages_by_type = {}
-            for url, content in self.page_content.items():
-                page_type = content["page_type"]
-                if page_type not in pages_by_type:
-                    pages_by_type[page_type] = []
-                pages_by_type[page_type].append((url, content))
+        try:
+            with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                # First, create a header with minimal metadata
+                f.write(f"{self.root_domain} Website Content\n")
+                f.write("="*len(f"{self.root_domain} Website Content") + "\n\n")
+                f.write(f"Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
                 
-            # Process each page type
-            for page_type, pages in sorted(pages_by_type.items()):
-                section_title = page_type.replace('_', ' ').title()
-                f.write(f"\n\n{section_title}\n")
-                f.write("-"*len(section_title) + "\n\n")
-                
-                # Process each page
-                for url, content in sorted(pages, key=lambda x: x[1]['title']):
-                    f.write(f"{content['title']}\n")
-                    f.write("."*len(content['title']) + "\n\n")
+                # Group pages by type for better organization
+                pages_by_type = {}
+                for url, content in self.page_content.items():
+                    page_type = content["page_type"]
+                    if page_type not in pages_by_type:
+                        pages_by_type[page_type] = []
+                    pages_by_type[page_type].append((url, content))
                     
-                    # Add the description if available
-                    if content['meta_description']:
-                        f.write(f"{content['meta_description']}\n\n")
+                # Process each page type
+                for page_type, pages in sorted(pages_by_type.items()):
+                    section_title = page_type.replace('_', ' ').title()
+                    f.write(f"\n\n{section_title}\n")
+                    f.write("-"*len(section_title) + "\n\n")
                     
-                    # Process elements in a more natural flow
-                    current_section = None
-                    
-                    for element in content['elements']:
-                        if element['type'] in self.included_tags['headings']:
-                            heading_text = element['text']
-                            level = int(element['type'][1])
-                            
-                            if level <= 2:  # Major heading
-                                f.write(f"\n{heading_text}\n")
-                                f.write("-"*len(heading_text) + "\n")
-                            else:  # Minor heading
-                                f.write(f"\n{heading_text}\n")
+                    # Process each page
+                    for url, content in sorted(pages, key=lambda x: x[1]['title']):
+                        # Write title with encoding validation
+                        title = self._validate_text(content['title'])
+                        f.write(f"{title}\n")
+                        f.write("."*len(title) + "\n\n")
+                        
+                        # Add the description if available
+                        if content['meta_description']:
+                            f.write(f"{self._validate_text(content['meta_description'])}\n\n")
+                        
+                        # Process elements in a more natural flow
+                        current_section = None
+                        
+                        for element in content['elements']:
+                            if element['type'] in self.included_tags['headings']:
+                                heading_text = self._validate_text(element['text'])
+                                level = int(element['type'][1])
                                 
-                            current_section = heading_text
+                                if level <= 2:  # Major heading
+                                    f.write(f"\n{heading_text}\n")
+                                    f.write("-"*len(heading_text) + "\n")
+                                else:  # Minor heading
+                                    f.write(f"\n{heading_text}\n")
+                                    
+                                current_section = heading_text
+                            
+                            elif element['type'] == 'paragraph':
+                                para_text = self._validate_text(element['text'])
+                                f.write(f"{para_text}\n\n")
+                            
+                            elif element['type'] == 'list':
+                                f.write("\n")
+                                for idx, item in enumerate(element['items']):
+                                    item_text = self._validate_text(item)
+                                    if element['list_type'] == 'unordered':
+                                        f.write(f"• {item_text}\n")  # Using a bullet character
+                                    else:
+                                        f.write(f"{idx+1}. {item_text}\n")
+                                f.write("\n")
+                            
+                            elif element['type'] == 'blockquote':
+                                quote_text = self._validate_text(element['text'])
+                                f.write("\n    ")  # Indent with 4 spaces
+                                # Replace newlines with newline + 4 spaces
+                                quote_text = quote_text.replace("\n", "\n    ")
+                                f.write(f"{quote_text}\n\n")
                         
-                        elif element['type'] == 'paragraph':
-                            f.write(f"{element['text']}\n\n")
-                        
-                        elif element['type'] == 'list':
-                            f.write("\n")
-                            for idx, item in enumerate(element['items']):
-                                if element['list_type'] == 'unordered':
-                                    f.write(f"• {item}\n")  # Using a bullet character
-                                else:
-                                    f.write(f"{idx+1}. {item}\n")
-                            f.write("\n")
-                        
-                        elif element['type'] == 'blockquote':
-                            f.write("\n    ")  # Indent with 4 spaces
-                            # Replace newlines with newline + 4 spaces
-                            quote_text = element['text'].replace("\n", "\n    ")
-                            f.write(f"{quote_text}\n\n")
+                        f.write("\n" + "-"*80 + "\n\n")
+            
+            print(f"Human-readable content saved to {output_file}")
+        except Exception as e:
+            print(f"Error saving readable content: {e}")
+            # Try with a more forgiving approach
+            try:
+                with open(output_file, 'w', encoding='utf-8', errors='replace') as f:
+                    f.write(f"{self.root_domain} Website Content\n")
+                    f.write("="*len(f"{self.root_domain} Website Content") + "\n\n")
+                    f.write(f"Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                    f.write("An error occurred while formatting the content.\n")
+                    f.write("Basic content dump follows:\n\n")
                     
-                    f.write("\n" + "-"*80 + "\n\n")
-        
-        print(f"Human-readable content saved to {output_file}")
+                    for url, content in self.page_content.items():
+                        f.write(f"\nURL: {url}\n")
+                        f.write(f"Title: {self._validate_text(content['title'])}\n")
+                        f.write("-"*80 + "\n")
+                        
+                        for element in content['elements']:
+                            if 'text' in element:
+                                f.write(self._validate_text(element['text']) + "\n\n")
+                            elif 'items' in element:
+                                for item in element['items']:
+                                    f.write(self._validate_text(item) + "\n")
+                
+                print(f"Simplified content saved to {output_file} due to formatting error")
+            except Exception as e2:
+                print(f"Critical error saving content: {e2}")
                     
     def _save_results(self):
         """Save the crawled results to the specified output format."""
@@ -1120,4 +1339,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
