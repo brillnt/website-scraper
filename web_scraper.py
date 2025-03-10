@@ -4,10 +4,29 @@ from bs4 import BeautifulSoup
 def scrape_website_copy(url):
     try:
         response = requests.get(url)
-        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-        text_content = soup.get_text(separator='\n', strip=True)
-        return text_content
+        
+        # Extract headings and paragraphs
+        headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+        paragraphs = soup.find_all('p')
+        
+        # Format the content
+        content = []
+        
+        # Add headings
+        for heading in headings:
+            heading_text = heading.get_text(strip=True)
+            if heading_text:  # Only add non-empty headings
+                content.append(f"{heading.name.upper()}: {heading_text}")
+        
+        # Add paragraphs
+        for para in paragraphs:
+            para_text = para.get_text(strip=True)
+            if para_text:  # Only add non-empty paragraphs
+                content.append(f"PARAGRAPH: {para_text}")
+        
+        return "\n\n".join(content)
     except requests.exceptions.RequestException as e:
         print(f"Request error: {e}")
         return None
