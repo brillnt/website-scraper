@@ -13,14 +13,17 @@ def scrape_website_copy(url):
         # Format the content
         content = []
         
-        # Process elements in order
+        # Process elements in order, filtering out nav and footer elements
         for element in elements:
-            element_text = element.get_text(strip=True)
-            if element_text:  # Only add non-empty elements
-                if element.name.startswith('h'):
-                    content.append(f"{element.name.upper()}: {element_text}")
-                else:  # It's a paragraph
-                    content.append(f"PARAGRAPH: {element_text}")
+            # Check if element is inside a nav or footer
+            nav_parent = element.find_parent('nav')
+            footer_parent = element.find_parent('footer')
+            
+            # Only include elements that are not inside nav or footer
+            if not nav_parent and not footer_parent:
+                element_text = element.get_text(strip=True)
+                if element_text:  # Only add non-empty elements
+                    content.append(element_text)
         
         return "\n\n".join(content)
     except requests.exceptions.RequestException as e:
