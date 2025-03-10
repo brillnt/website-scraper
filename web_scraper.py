@@ -7,24 +7,20 @@ def scrape_website_copy(url):
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # Extract headings and paragraphs
-        headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-        paragraphs = soup.find_all('p')
+        # Extract headings and paragraphs in the order they appear
+        elements = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p'])
         
         # Format the content
         content = []
         
-        # Add headings
-        for heading in headings:
-            heading_text = heading.get_text(strip=True)
-            if heading_text:  # Only add non-empty headings
-                content.append(f"{heading.name.upper()}: {heading_text}")
-        
-        # Add paragraphs
-        for para in paragraphs:
-            para_text = para.get_text(strip=True)
-            if para_text:  # Only add non-empty paragraphs
-                content.append(f"PARAGRAPH: {para_text}")
+        # Process elements in order
+        for element in elements:
+            element_text = element.get_text(strip=True)
+            if element_text:  # Only add non-empty elements
+                if element.name.startswith('h'):
+                    content.append(f"{element.name.upper()}: {element_text}")
+                else:  # It's a paragraph
+                    content.append(f"PARAGRAPH: {element_text}")
         
         return "\n\n".join(content)
     except requests.exceptions.RequestException as e:
