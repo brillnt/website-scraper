@@ -8,8 +8,10 @@ Note: The initial version of this script extracted every link on the page and th
 
 ## Installation
 
+Note this script requires python 3.11 or greater.
+
 ```bash
-pip install website-scraper
+pip install git+https://github.com/brillnt/website-scraper.git
 ```
 
 ## Usage
