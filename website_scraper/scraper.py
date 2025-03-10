@@ -116,7 +116,7 @@ def get_filename_from_url(url):
     # Add .txt extension
     return f"{path}.txt"
 
-def scrape_website_and_nav_pages(start_url):
+def scrape_website_and_nav_pages(start_url, skip_nav_links=False):
     # Create the output directory
     domain = get_domain_for_directory(start_url)
     base_dir = f"./{domain}"
@@ -164,9 +164,10 @@ def scrape_website_and_nav_pages(start_url):
             # Add to scraped set
             scraped.add(current_url)
             
-            # Add new links to scrape
-            new_links = nav_links - scraped
-            to_scrape.update(new_links)
+            # Add new links to scrape (only if not skipping nav links)
+            if not skip_nav_links:
+                new_links = nav_links - scraped
+                to_scrape.update(new_links)
             
             # Be polite - add a small delay
             time.sleep(1)
