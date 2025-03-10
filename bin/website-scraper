@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+
+import argparse
+from website_scraper import scrape_website_and_nav_pages
+
+def main():
+    parser = argparse.ArgumentParser(description='Scrape website content focusing on headings and text.')
+    parser.add_argument('url', type=str, help='URL of the website to scrape')
+    parser.add_argument('--no-nav', action='store_true', help='Do not scrape navigation links')
+    
+    args = parser.parse_args()
+    
+    output_dir, pages_scraped = scrape_website_and_nav_pages(args.url)
+    
+    print(f"\nScraping complete!")
+    print(f"Scraped {pages_scraped} pages to directory: {output_dir}")
+
+if __name__ == '__main__':
+    main()
