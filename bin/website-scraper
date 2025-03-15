@@ -9,7 +9,7 @@ def main():
     parser = argparse.ArgumentParser(description='Scrape website content focusing on headings and text.')
     parser.add_argument('--version', action='store_true', help='Display the version number and exit')
     parser.add_argument('url', type=str, help='URL of the website to scrape', nargs='?')
-    parser.add_argument('--skip-links', action='store_true', help='Scrape only the provided URL without following navigation links')
+    parser.add_argument('--skip-links', action='store_true', help='Scrape only the provided URL without following links')
     
     args = parser.parse_args()
     
@@ -22,7 +22,7 @@ def main():
     if not args.url:
         parser.error("the following arguments are required: url")
     
-    output_dir, pages_scraped = scrape_website_and_nav_pages(args.url, skip_nav_links=args.skip_links)
+    output_dir, pages_scraped = scrape_website_and_nav_pages(args.url, skip_links=args.skip_links)
     
     print(f"\nScraping complete!")
     print(f"Scraped {pages_scraped} pages to directory: {output_dir}")

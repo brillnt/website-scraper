@@ -35,10 +35,10 @@ def scrape_page(url):
         # Join content with double newlines
         page_content = "\n\n".join(content)
         
-        # Extract nav links for further scraping
-        nav_links = extract_nav_links(soup, url)
+        # Extract all links for further scraping
+        page_links = extract_page_links(soup, url)
         
-        return page_content, nav_links
+        return page_content, page_links
     except requests.exceptions.RequestException as e:
         print(f"Request error for {url}: {e}")
         return None, set()
@@ -46,49 +46,68 @@ def scrape_page(url):
         print(f"An error occurred when scraping {url}: {e}")
         return None, set()
 
-def extract_nav_links(soup, base_url):
-    # Find all nav elements
-    nav_elements = soup.find_all('nav')
+def normalize_url(url):
+    # Parse the URL
+    parsed = urlparse(url)
+    netloc = parsed.netloc.lower()
+    path = parsed.path
     
+    # Handle trailing slashes and index pages
+    if path == "" or path == "/":
+        path = "/"
+    elif path.endswith("index.html") or path.endswith("index.htm") or path.endswith("index.php"):
+        path = path[:path.rfind("/")+1]
+    
+    # Reconstruct URL without query string or fragment
+    return f"{parsed.scheme}://{netloc}{path}"
+
+def extract_page_links(soup, base_url):
+    """Extract all page links from anchor tags in the soup object.
+    
+    Args:
+        soup: BeautifulSoup object
+        base_url: Base URL for resolving relative links
+        
+    Returns:
+        set: Set of normalized URLs from the same domain
+    """
+    # Find all anchor tags
     links = set()
     
-    # Extract links from each nav element
-    for nav in nav_elements:
-        a_tags = nav.find_all('a', href=True)
-        for a in a_tags:
-            href = a['href']
-            # Convert relative URLs to absolute
-            full_url = urljoin(base_url, href)
-            # Remove fragments
-            full_url, _ = urldefrag(full_url)
-            links.add(full_url)
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        # Skip empty or javascript or mailto links
+        if not href or href.startswith('javascript:') or href.startswith('mailto:'):
+            continue
+            
+        # Convert relative URLs to absolute and remove fragments
+        full_url = urljoin(base_url, href)
+        full_url, _ = urldefrag(full_url)
+        
+        # Normalize URL to handle variations
+        normalized_url = normalize_url(full_url)
+        
+        if is_same_domain(base_url, normalized_url):
+            links.add(normalized_url)
     
-    # Filter to only include same-domain links
-    same_domain_links = {url for url in links if is_same_domain(base_url, url)}
-    
-    return same_domain_links
+    return links
 
 def is_same_domain(base_url, url):
     # Parse both URLs
-    base_parsed = urlparse(base_url)
-    parsed = urlparse(url)
+    base_domain = urlparse(base_url).netloc
+    domain = urlparse(url).netloc
     
-    # Get domains (removing www if present)
-    base_domain = base_parsed.netloc
+    # Remove www if present
     if base_domain.startswith('www.'):
         base_domain = base_domain[4:]
-    
-    domain = parsed.netloc
     if domain.startswith('www.'):
         domain = domain[4:]
     
-    # Check if domains match
     return domain == base_domain
 
 def get_domain_for_directory(url):
     # Parse the domain from the URL
-    parsed_url = urlparse(url)
-    domain = parsed_url.netloc
+    domain = urlparse(url).netloc
     
     # Remove www subdomain if present
     if domain.startswith('www.'):
@@ -100,23 +119,31 @@ def get_domain_for_directory(url):
     return domain
 
 def get_filename_from_url(url):
-    # Parse the URL
-    parsed_url = urlparse(url)
+    # Normalize the URL first
+    url = normalize_url(url)
+    parsed = urlparse(url)
+    path = parsed.path
     
     # If it's the homepage, return index.txt
-    if parsed_url.path == '/' or parsed_url.path == '':
-        return 'index.txt'
+    if path == "/":
+        return "index.txt"
     
-    # Remove leading and trailing slashes
-    path = parsed_url.path.strip('/')
-    
-    # Replace remaining slashes with hyphens
-    path = path.replace('/', '-')
+    # Remove leading slash and replace other slashes with hyphens
+    path = path.strip("/").replace("/", "-")
     
     # Add .txt extension
     return f"{path}.txt"
 
-def scrape_website_and_nav_pages(start_url, skip_nav_links=False):
+def scrape_website_and_nav_pages(start_url, skip_links=False):
+    """Scrape a website and optionally follow all links on the pages.
+    
+    Args:
+        start_url: URL to start scraping from
+        skip_links: If True, only scrape the start URL without following links
+        
+    Returns:
+        tuple: (output_directory, number_of_pages_scraped)
+    """
     # Create the output directory
     domain = get_domain_for_directory(start_url)
     base_dir = f"./{domain}"
@@ -132,9 +159,13 @@ def scrape_website_and_nav_pages(start_url, skip_nav_links=False):
     os.makedirs(output_dir)
     print(f"Created output directory: {output_dir}")
     
-    # Initialize sets for tracking
+    # Normalize the start URL
+    start_url = normalize_url(start_url)
+    
+    # Initialize tracking sets
     to_scrape = {start_url}
     scraped = set()
+    seen_urls = {start_url}  # Track all URLs we've seen
     
     # Scrape pages
     while to_scrape:
@@ -148,7 +179,7 @@ def scrape_website_and_nav_pages(start_url, skip_nav_links=False):
         print(f"Scraping: {current_url}")
         
         # Scrape the page
-        content, nav_links = scrape_page(current_url)
+        content, links = scrape_page(current_url)
         
         if content:
             # Get the filename
@@ -156,7 +187,7 @@ def scrape_website_and_nav_pages(start_url, skip_nav_links=False):
             file_path = os.path.join(output_dir, filename)
             
             # Save to file
-            with open(file_path, 'w', encoding='utf-8') as file:
+            with open(file_path, "w", encoding="utf-8") as file:
                 file.write(content)
             
             print(f"Saved content to: {file_path}")
@@ -164,10 +195,13 @@ def scrape_website_and_nav_pages(start_url, skip_nav_links=False):
             # Add to scraped set
             scraped.add(current_url)
             
-            # Add new links to scrape (only if not skipping nav links)
-            if not skip_nav_links:
-                new_links = nav_links - scraped
-                to_scrape.update(new_links)
+            # Add new links to scrape (only if not skipping links)
+            if not skip_links:
+                for link in links:
+                    # Only add unseen URLs
+                    if link not in seen_urls:
+                        seen_urls.add(link)
+                        to_scrape.add(link)
             
             # Be polite - add a small delay
             time.sleep(1)
